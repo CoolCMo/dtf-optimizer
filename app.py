@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 import io
 import math
 
@@ -9,7 +9,7 @@ MARGIN_IN = 0.5
 DPI = 300
 
 def clear_all_data():
-    for key in st.session_state.keys():
+    for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.session_state.inventory = []
 
@@ -51,17 +51,21 @@ def optimize_layout(artworks, roll_width_in):
 
     return placed_items, curr_y + shelf_h
 
-def generate_png_file(placed_art, roll_w, roll_h):
+def generate_png_file(placed_art, roll_w, roll_h, mirror=False):
     pixel_w, pixel_h = int(roll_w * DPI), int(roll_h * DPI)
     output_img = Image.new('RGBA', (pixel_w, pixel_h), (0, 0, 0, 0))
     
     for art in placed_art:
         target_w, target_h = int(art['w'] * DPI), int(art['h'] * DPI)
         resized_art = art['image'].resize((target_w, target_h), Image.Resampling.LANCZOS)
+        
         paste_x = int((art['x'] + MARGIN_IN) * DPI)
         paste_y = int((art['y'] + MARGIN_IN) * DPI)
         output_img.alpha_composite(resized_art, (paste_x, paste_y))
     
+    if mirror:
+        output_img = ImageOps.mirror(output_img)
+        
     buffer = io.BytesIO()
     output_img.save(buffer, format="PNG", dpi=(DPI, DPI))
     buffer.seek(0)
@@ -73,13 +77,15 @@ st.set_page_config(page_title="DTF Content Optimizer", layout="wide")
 if 'inventory' not in st.session_state: 
     st.session_state.inventory = []
 
-st.title("🖼️ DTF "Content-Only" Gang Sheet Builder")
+# FIXED SYNTAX HERE:
+st.title('🖼️ DTF "Content-Only" Gang Sheet Builder')
 
 with st.sidebar:
     st.header("1. Job Details")
     cust_name = st.text_input("Customer Name", value="Retail Client", key="cust_name")
     order_num = st.text_input("Order Number", value="1001", key="order_num")
     price_ft = st.number_input("Price per Foot ($)", value=15.0, key="price_ft")
+    mirror_print = st.checkbox("Mirror Image (Flip Horizontal)", value=False)
     
     if st.button("🗑️ CLEAR ALL DATA", use_container_width=True, type="primary"):
         clear_all_data()
@@ -87,20 +93,16 @@ with st.sidebar:
 
     st.divider()
     st.header("2. Upload & Auto-Trim")
-    file = st.file_uploader("Upload PNG (App will auto-trim artboard)", type=['png'], key="file_uploader")
+    file = st.file_uploader("Upload PNG", type=['png'], key="file_uploader")
     
     if file:
         raw_img = Image.open(file).convert("RGBA")
-        
-        # --- AUTO-TRIM LOGIC ---
-        # Find the bounding box of non-zero (non-transparent) pixels
         bbox = raw_img.getbbox()
         if bbox:
             img_data = raw_img.crop(bbox)
             st.success("Artboard trimmed to design edges!")
         else:
             img_data = raw_img
-            st.warning("No transparent pixels found to trim.")
 
         dpi_val = img_data.info.get('dpi', (DPI, DPI))[0]
         auto_w = round(img_data.width / dpi_val, 2)
@@ -131,9 +133,8 @@ if st.session_state.inventory:
     m2.metric("Total Cost", f"${(billable_len/12)*price_ft:.2f}")
     m3.metric("Free Space", f"{billable_len - actual_h:.1f}\"")
 
-    # PNG Export
     with st.spinner("Generating High-Res PNG..."):
-        png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len)
+        png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len, mirror=mirror_print)
         st.download_button(
             label="📥 Download 300 DPI Transparent PNG", 
             data=png_output, 
@@ -150,6 +151,10 @@ if st.session_state.inventory:
         thumb.thumbnail((int(art['w'] * preview_scale), int(art['h'] * preview_scale)))
         px, py = int((art['x'] + MARGIN_IN) * preview_scale), int((art['y'] + MARGIN_IN) * preview_scale)
         viz.paste(thumb, (px, py), thumb)
-    st.image(viz, caption="Trimmed Layout Preview", use_container_width=True)
+    
+    if mirror_print:
+        viz = ImageOps.mirror(viz)
+        
+    st.image(viz, caption="Trimmed Layout Preview (Mirror Active)" if mirror_print else "Trimmed Layout Preview", use_container_width=True)
 else:
     st.info("Upload a file to automatically detect design dimensions.")

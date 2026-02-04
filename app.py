@@ -5,7 +5,7 @@ import math
 
 # --- Configuration ---
 ROLL_WIDTH_IN = 22
-MARGIN_IN = 0.375  # Updated to .375"
+MARGIN_IN = 0.375 
 DPI = 300
 
 def clear_all_data():
@@ -19,17 +19,14 @@ def optimize_layout(artworks, roll_width_in):
         w_orig, h_orig = art['print_w'], art['print_h']
         img = art['image']
         
-        # Determine best rotation: 
-        # We check which orientation results in a smaller 'shelf height' 
-        # while still fitting within the 22" roll width.
         can_fit_normal = (w_orig + (2 * MARGIN_IN)) <= roll_width_in
         can_fit_rotated = (h_orig + (2 * MARGIN_IN)) <= roll_width_in
         
         rotated = False
         w, h = w_orig, h_orig
         
+        # Optimization: Rotate if it makes the shelf shorter or is required to fit
         if can_fit_rotated:
-            # If rotating makes it shorter, OR if it's the only way it fits
             if h_orig < w_orig or not can_fit_normal:
                 w, h = h_orig, w_orig
                 img = img.rotate(90, expand=True)
@@ -41,12 +38,10 @@ def optimize_layout(artworks, roll_width_in):
             'rotated': rotated
         })
 
-    # Sort by height descending to create tight "shelves"
     sorted_art = sorted(processed_art, key=lambda x: x['total_h'], reverse=True)
     placed_items, curr_x, curr_y, shelf_h = [], 0, 0, 0
     
     for art in sorted_art:
-        # Check if we need to move to a new "shelf" (row)
         if curr_x + art['total_w'] > roll_width_in:
             curr_x = 0
             curr_y += shelf_h
@@ -65,7 +60,6 @@ def generate_png_file(placed_art, roll_w, roll_h, mirror=False):
     for art in placed_art:
         target_w, target_h = int(art['w'] * DPI), int(art['h'] * DPI)
         resized_art = art['image'].resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
         paste_x = int((art['x'] + MARGIN_IN) * DPI)
         paste_y = int((art['y'] + MARGIN_IN) * DPI)
         output_img.alpha_composite(resized_art, (paste_x, paste_y))
@@ -127,6 +121,7 @@ with st.sidebar:
                 st.rerun()
 
 if st.session_state.inventory:
+    # Initial packing
     placed, actual_h = optimize_layout(st.session_state.inventory, ROLL_WIDTH_IN)
     billable_len = math.ceil(actual_h / 12) * 12
     
@@ -134,6 +129,28 @@ if st.session_state.inventory:
     m1.metric("Roll Length", f"{billable_len}\"")
     m2.metric("Total Cost", f"${(billable_len/12)*price_ft:.2f}")
     m3.metric("Margin Setting", '0.375"')
+
+    # --- AUTO-FILL REINSTATED ---
+    st.divider()
+    last_item = st.session_state.inventory[-1]
+    temp_inv = st.session_state.inventory.copy()
+    added_count = 0
+    
+    # Check if more can fit in the CURRENT billable foot
+    while True:
+        temp_inv.append(last_item)
+        _, test_h = optimize_layout(temp_inv, ROLL_WIDTH_IN)
+        if test_h > billable_len:
+            break
+        added_count += 1
+    
+    if added_count > 0:
+        st.info(f"💡 You have room for **{added_count} more** of '{last_item['id']}' without increasing your foot cost.")
+        if st.button(f"Fill remaining {billable_len}\" space (+{added_count} items)"):
+            for _ in range(added_count):
+                st.session_state.inventory.append(last_item)
+            st.rerun()
+    # -----------------------------
 
     with st.spinner("Generating High-Res PNG..."):
         png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len, mirror=mirror_print)

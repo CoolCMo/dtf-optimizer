@@ -9,9 +9,15 @@ MARGIN_IN = 0.375
 DPI = 300
 
 def clear_all_data():
+    # Clear all keys in session state
     for key in list(st.session_state.keys()):
         del st.session_state[key]
+    # Explicitly re-initialize inventory
     st.session_state.inventory = []
+    # Using a counter key to force the file uploader to re-render blank
+    if 'uploader_key' not in st.session_state:
+        st.session_state.uploader_key = 0
+    st.session_state.uploader_key += 1
 
 def optimize_layout(artworks, roll_width_in):
     processed_art = []
@@ -25,7 +31,7 @@ def optimize_layout(artworks, roll_width_in):
         rotated = False
         w, h = w_orig, h_orig
         
-        # Optimization: Rotate if it makes the shelf shorter or is required to fit
+        # Optimization: Priority rotation for height minimization
         if can_fit_rotated:
             if h_orig < w_orig or not can_fit_normal:
                 w, h = h_orig, w_orig
@@ -38,6 +44,7 @@ def optimize_layout(artworks, roll_width_in):
             'rotated': rotated
         })
 
+    # Shelf-packing: Sort by height descending
     sorted_art = sorted(processed_art, key=lambda x: x['total_h'], reverse=True)
     placed_items, curr_x, curr_y, shelf_h = [], 0, 0, 0
     
@@ -77,23 +84,27 @@ st.set_page_config(page_title="DTF Content Optimizer", layout="wide")
 
 if 'inventory' not in st.session_state: 
     st.session_state.inventory = []
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
 
 st.title('🖼️ DTF "Content-Only" Gang Sheet Builder')
 
 with st.sidebar:
     st.header("1. Job Details")
-    cust_name = st.text_input("Customer Name", value="Retail Client", key="cust_name")
-    order_num = st.text_input("Order Number", value="1001", key="order_num")
-    price_ft = st.number_input("Price per Foot ($)", value=15.0, key="price_ft")
+    cust_name = st.text_input("Customer Name", value="Retail Client", key="cust_name_input")
+    order_num = st.text_input("Order Number", value="1001", key="order_num_input")
+    price_ft = st.number_input("Price per Foot ($)", value=15.0, key="price_ft_input")
     mirror_print = st.checkbox("Mirror Image (Flip Horizontal)", value=False)
     
+    # Updated Clear Button with widget key reset
     if st.button("🗑️ CLEAR ALL DATA", use_container_width=True, type="primary"):
         clear_all_data()
         st.rerun()
 
     st.divider()
     st.header("2. Upload & Auto-Trim")
-    file = st.file_uploader("Upload PNG", type=['png'], key="file_uploader")
+    # Using dynamic key to clear the file uploader
+    file = st.file_uploader("Upload PNG", type=['png'], key=f"uploader_{st.session_state.uploader_key}")
     
     if file:
         raw_img = Image.open(file).convert("RGBA")
@@ -121,7 +132,6 @@ with st.sidebar:
                 st.rerun()
 
 if st.session_state.inventory:
-    # Initial packing
     placed, actual_h = optimize_layout(st.session_state.inventory, ROLL_WIDTH_IN)
     billable_len = math.ceil(actual_h / 12) * 12
     
@@ -130,13 +140,12 @@ if st.session_state.inventory:
     m2.metric("Total Cost", f"${(billable_len/12)*price_ft:.2f}")
     m3.metric("Margin Setting", '0.375"')
 
-    # --- AUTO-FILL REINSTATED ---
+    # --- AUTO-FILL ---
     st.divider()
     last_item = st.session_state.inventory[-1]
     temp_inv = st.session_state.inventory.copy()
     added_count = 0
     
-    # Check if more can fit in the CURRENT billable foot
     while True:
         temp_inv.append(last_item)
         _, test_h = optimize_layout(temp_inv, ROLL_WIDTH_IN)
@@ -145,12 +154,10 @@ if st.session_state.inventory:
         added_count += 1
     
     if added_count > 0:
-        st.info(f"💡 You have room for **{added_count} more** of '{last_item['id']}' without increasing your foot cost.")
-        if st.button(f"Fill remaining {billable_len}\" space (+{added_count} items)"):
+        if st.button(f"💡 Fill remaining space with {added_count} more items"):
             for _ in range(added_count):
                 st.session_state.inventory.append(last_item)
             st.rerun()
-    # -----------------------------
 
     with st.spinner("Generating High-Res PNG..."):
         png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len, mirror=mirror_print)
@@ -175,3 +182,5 @@ if st.session_state.inventory:
         viz = ImageOps.mirror(viz)
         
     st.image(viz, caption="Optimized Layout Preview", use_container_width=True)
+else:
+    st.info("Upload a file to start building your roll.")

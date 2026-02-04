@@ -115,7 +115,7 @@ st.set_page_config(page_title="DTF Content Optimizer", layout="wide")
 if 'inventory' not in st.session_state: st.session_state.inventory = []
 if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
 
-st.title('🖼️ DTF Evenly Distributed Gang Sheet Builder')
+st.title('🖼️ Print It Plus DTF Gang Sheet Builder')
 
 with st.sidebar:
     st.header("1. Job Details")

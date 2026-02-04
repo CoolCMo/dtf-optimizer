@@ -19,6 +19,8 @@ def optimize_layout(artworks, roll_width_in):
         w, h = art['print_w'], art['print_h']
         img = art['image']
         rotated = False
+        
+        # Auto-rotate logic for efficiency
         if w + (2 * MARGIN_IN) > roll_width_in:
             if h + (2 * MARGIN_IN) <= roll_width_in:
                 w, h = h, w
@@ -50,41 +52,28 @@ def optimize_layout(artworks, roll_width_in):
     return placed_items, curr_y + shelf_h
 
 def generate_png_file(placed_art, roll_w, roll_h):
-    # Calculate pixel dimensions for 300 DPI
-    pixel_w = int(roll_w * DPI)
-    pixel_h = int(roll_h * DPI)
-    
-    # Create a transparent base image (RGBA)
+    pixel_w, pixel_h = int(roll_w * DPI), int(roll_h * DPI)
     output_img = Image.new('RGBA', (pixel_w, pixel_h), (0, 0, 0, 0))
     
     for art in placed_art:
-        # Scale the original artwork to the target print size in pixels
-        target_w = int(art['w'] * DPI)
-        target_h = int(art['h'] * DPI)
-        
-        # Resize high-quality
+        target_w, target_h = int(art['w'] * DPI), int(art['h'] * DPI)
         resized_art = art['image'].resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
-        # Calculate pixel position (adding margin)
         paste_x = int((art['x'] + MARGIN_IN) * DPI)
         paste_y = int((art['y'] + MARGIN_IN) * DPI)
-        
-        # Paste onto the transparent canvas
         output_img.alpha_composite(resized_art, (paste_x, paste_y))
     
-    # Save to buffer
     buffer = io.BytesIO()
     output_img.save(buffer, format="PNG", dpi=(DPI, DPI))
     buffer.seek(0)
     return buffer
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="DTF PNG Builder", layout="wide")
+st.set_page_config(page_title="DTF Content Optimizer", layout="wide")
 
 if 'inventory' not in st.session_state: 
     st.session_state.inventory = []
 
-st.title("🖼️ DTF 300 DPI PNG Gang Sheet Builder")
+st.title("🖼️ DTF "Content-Only" Gang Sheet Builder")
 
 with st.sidebar:
     st.header("1. Job Details")
@@ -97,21 +86,32 @@ with st.sidebar:
         st.rerun()
 
     st.divider()
-    st.header("2. Upload & Add")
-    file = st.file_uploader("Upload PNG", type=['png'], key="file_uploader")
+    st.header("2. Upload & Auto-Trim")
+    file = st.file_uploader("Upload PNG (App will auto-trim artboard)", type=['png'], key="file_uploader")
     
     if file:
-        img_data = Image.open(file).convert("RGBA")
+        raw_img = Image.open(file).convert("RGBA")
+        
+        # --- AUTO-TRIM LOGIC ---
+        # Find the bounding box of non-zero (non-transparent) pixels
+        bbox = raw_img.getbbox()
+        if bbox:
+            img_data = raw_img.crop(bbox)
+            st.success("Artboard trimmed to design edges!")
+        else:
+            img_data = raw_img
+            st.warning("No transparent pixels found to trim.")
+
         dpi_val = img_data.info.get('dpi', (DPI, DPI))[0]
         auto_w = round(img_data.width / dpi_val, 2)
         auto_h = round(img_data.height / dpi_val, 2)
         
-        st.caption(f"Detected: {img_data.width}x{img_data.height}px @ {int(dpi_val)} DPI")
+        st.caption(f"Trimmed Content: {img_data.width}x{img_data.height}px")
 
         with st.form("add_art", clear_on_submit=True):
             col1, col2 = st.columns(2)
-            w_in = col1.number_input("Width (in)", 0.1, 22.0, float(auto_w))
-            h_in = col2.number_input("Height (in)", 0.1, 120.0, float(auto_h))
+            w_in = col1.number_input("Print Width (in)", 0.1, 22.0, float(auto_w))
+            h_in = col2.number_input("Print Height (in)", 0.1, 120.0, float(auto_h))
             qty = st.number_input("Qty", 1, 100, 1)
             
             if st.form_submit_button("Add to Roll"):
@@ -124,7 +124,6 @@ with st.sidebar:
 
 if st.session_state.inventory:
     placed, actual_h = optimize_layout(st.session_state.inventory, ROLL_WIDTH_IN)
-    # Removing the header space since text headers don't support transparency in PNGs well
     billable_len = math.ceil(actual_h / 12) * 12
     
     m1, m2, m3 = st.columns(3)
@@ -132,40 +131,25 @@ if st.session_state.inventory:
     m2.metric("Total Cost", f"${(billable_len/12)*price_ft:.2f}")
     m3.metric("Free Space", f"{billable_len - actual_h:.1f}\"")
 
-    # Auto-Fill logic remains the same
-    last_item = st.session_state.inventory[-1]
-    temp_inv = st.session_state.inventory.copy()
-    added_count = 0
-    while True:
-        temp_inv.append(last_item)
-        _, test_h = optimize_layout(temp_inv, ROLL_WIDTH_IN)
-        if test_h > billable_len: break
-        added_count += 1
-    
-    if added_count > 0:
-        if st.button(f"💡 Fill remaining space with {added_count} more items"):
-            for _ in range(added_count): st.session_state.inventory.append(last_item)
-            st.rerun()
-
     # PNG Export
     with st.spinner("Generating High-Res PNG..."):
         png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len)
         st.download_button(
             label="📥 Download 300 DPI Transparent PNG", 
             data=png_output, 
-            file_name=f"{cust_name}_Order_{order_num}.png", 
+            file_name=f"{cust_name}_{order_num}.png", 
             mime="image/png",
             use_container_width=True
         )
 
-    # Visualization (Lower res for web preview)
+    # Visualization
     preview_scale = 20
-    viz = Image.new('RGBA', (int(ROLL_WIDTH_IN * preview_scale), int(billable_len * preview_scale)), (200, 200, 200, 255))
+    viz = Image.new('RGBA', (int(ROLL_WIDTH_IN * preview_scale), int(billable_len * preview_scale)), (240, 240, 240, 255))
     for art in placed:
         thumb = art['image'].copy()
         thumb.thumbnail((int(art['w'] * preview_scale), int(art['h'] * preview_scale)))
         px, py = int((art['x'] + MARGIN_IN) * preview_scale), int((art['y'] + MARGIN_IN) * preview_scale)
         viz.paste(thumb, (px, py), thumb)
-    st.image(viz, caption="Web Preview (Grey background for visibility)", use_container_width=True)
+    st.image(viz, caption="Trimmed Layout Preview", use_container_width=True)
 else:
-    st.info("Upload artwork to begin building your transparent gang sheet.")
+    st.info("Upload a file to automatically detect design dimensions.")

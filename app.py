@@ -5,7 +5,7 @@ import math
 
 # --- Configuration ---
 ROLL_WIDTH_IN = 22
-MARGIN_IN = 0.5
+MARGIN_IN = 0.375  # Updated to .375"
 DPI = 300
 
 def clear_all_data():
@@ -16,20 +16,24 @@ def clear_all_data():
 def optimize_layout(artworks, roll_width_in):
     processed_art = []
     for art in artworks:
-        w, h = art['print_w'], art['print_h']
+        w_orig, h_orig = art['print_w'], art['print_h']
         img = art['image']
-        rotated = False
         
-        # Auto-rotate logic for efficiency
-        if w + (2 * MARGIN_IN) > roll_width_in:
-            if h + (2 * MARGIN_IN) <= roll_width_in:
-                w, h = h, w
+        # Determine best rotation: 
+        # We check which orientation results in a smaller 'shelf height' 
+        # while still fitting within the 22" roll width.
+        can_fit_normal = (w_orig + (2 * MARGIN_IN)) <= roll_width_in
+        can_fit_rotated = (h_orig + (2 * MARGIN_IN)) <= roll_width_in
+        
+        rotated = False
+        w, h = w_orig, h_orig
+        
+        if can_fit_rotated:
+            # If rotating makes it shorter, OR if it's the only way it fits
+            if h_orig < w_orig or not can_fit_normal:
+                w, h = h_orig, w_orig
                 img = img.rotate(90, expand=True)
                 rotated = True
-        elif h > w and (h + (2 * MARGIN_IN) <= roll_width_in):
-            w, h = h, w
-            img = img.rotate(90, expand=True)
-            rotated = True
         
         processed_art.append({
             'id': art['id'], 'image': img, 'w': w, 'h': h,
@@ -37,14 +41,17 @@ def optimize_layout(artworks, roll_width_in):
             'rotated': rotated
         })
 
+    # Sort by height descending to create tight "shelves"
     sorted_art = sorted(processed_art, key=lambda x: x['total_h'], reverse=True)
     placed_items, curr_x, curr_y, shelf_h = [], 0, 0, 0
     
     for art in sorted_art:
+        # Check if we need to move to a new "shelf" (row)
         if curr_x + art['total_w'] > roll_width_in:
             curr_x = 0
             curr_y += shelf_h
             shelf_h = 0
+            
         placed_items.append({**art, 'x': curr_x, 'y': curr_y})
         curr_x += art['total_w']
         shelf_h = max(shelf_h, art['total_h'])
@@ -77,7 +84,6 @@ st.set_page_config(page_title="DTF Content Optimizer", layout="wide")
 if 'inventory' not in st.session_state: 
     st.session_state.inventory = []
 
-# FIXED SYNTAX HERE:
 st.title('🖼️ DTF "Content-Only" Gang Sheet Builder')
 
 with st.sidebar:
@@ -98,17 +104,13 @@ with st.sidebar:
     if file:
         raw_img = Image.open(file).convert("RGBA")
         bbox = raw_img.getbbox()
-        if bbox:
-            img_data = raw_img.crop(bbox)
-            st.success("Artboard trimmed to design edges!")
-        else:
-            img_data = raw_img
-
+        img_data = raw_img.crop(bbox) if bbox else raw_img
+        
         dpi_val = img_data.info.get('dpi', (DPI, DPI))[0]
         auto_w = round(img_data.width / dpi_val, 2)
         auto_h = round(img_data.height / dpi_val, 2)
         
-        st.caption(f"Trimmed Content: {img_data.width}x{img_data.height}px")
+        st.caption(f"Trimmed Size: {img_data.width}x{img_data.height}px")
 
         with st.form("add_art", clear_on_submit=True):
             col1, col2 = st.columns(2)
@@ -131,7 +133,7 @@ if st.session_state.inventory:
     m1, m2, m3 = st.columns(3)
     m1.metric("Roll Length", f"{billable_len}\"")
     m2.metric("Total Cost", f"${(billable_len/12)*price_ft:.2f}")
-    m3.metric("Free Space", f"{billable_len - actual_h:.1f}\"")
+    m3.metric("Margin Setting", '0.375"')
 
     with st.spinner("Generating High-Res PNG..."):
         png_output = generate_png_file(placed, ROLL_WIDTH_IN, billable_len, mirror=mirror_print)
@@ -155,6 +157,4 @@ if st.session_state.inventory:
     if mirror_print:
         viz = ImageOps.mirror(viz)
         
-    st.image(viz, caption="Trimmed Layout Preview (Mirror Active)" if mirror_print else "Trimmed Layout Preview", use_container_width=True)
-else:
-    st.info("Upload a file to automatically detect design dimensions.")
+    st.image(viz, caption="Optimized Layout Preview", use_container_width=True)

@@ -1,171 +1,125 @@
 import streamlit as st
 from PIL import Image, ImageDraw, ImageOps
-import io
-import math
-import fitz  # PyMuPDF
-import json
-import datetime
+import io, math, json, datetime
+import fitz # PyMuPDF
 
-# --- 1. Configuration ---
-ROLL_WIDTH_IN = 22
-MARGIN_IN = 0.375 
-DPI = 300
+# Settings
+ROLL_WIDTH_IN, MARGIN_IN, DPI = 22, 0.375, 300
 
-# --- 2. Session State ---
-if 'inventory' not in st.session_state:
-    st.session_state.inventory = []
-if 'uploader_key' not in st.session_state:
-    st.session_state.uploader_key = 0
-if 'history' not in st.session_state:
-    st.session_state.history = []
+# State
+if 'inventory' not in st.session_state: st.session_state.inventory = []
+if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
+if 'history' not in st.session_state: st.session_state.history = []
 
-# --- 3. Functions ---
 def clear_all_data():
-    for key in list(st.session_state.keys()):
-        if key != 'history': del st.session_state[key]
-    st.session_state.inventory = []
-    st.session_state.uploader_key = st.session_state.get('uploader_key', 0) + 1
+    for k in list(st.session_state.keys()):
+        if k != 'history': del st.session_state[k]
+    st.session_state.inventory, st.session_state.uploader_key = [], st.session_state.get('uploader_key', 0) + 1
 
-def rasterize_vector(file_bytes, extension):
+def rasterize_vector(f_bytes, ext):
     try:
-        doc = fitz.open(stream=file_bytes, filetype=extension)
-        page = doc.load_page(0)
-        zoom = DPI / 72
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat, alpha=True)
+        doc = fitz.open(stream=f_bytes, filetype=ext)
+        pix = doc.load_page(0).get_pixmap(matrix=fitz.Matrix(DPI/72, DPI/72), alpha=True)
         img = Image.frombytes("RGBA", [pix.width, pix.height], pix.samples)
         doc.close()
         return img
-    except Exception as e:
-        st.error(f"Vector Error: {e}")
-        return None
+    except: return None
 
-def optimize_layout_distributed(artworks, roll_width_in):
+def optimize_layout_distributed(artworks, roll_w):
     if not artworks: return [], 0
-    processed = []
-    for art in artworks:
-        w_orig, h_orig = art['print_w'], art['print_h']
-        img = art['image']
-        can_fit_n = (w_orig + (2 * MARGIN_IN)) <= roll_width_in
-        can_fit_r = (h_orig + (2 * MARGIN_IN)) <= roll_width_in
-        w, h = w_orig, h_orig
-        if can_fit_r and (h_orig < w_orig or not can_fit_n):
-            w, h = h_orig, w_orig
-            img = img.rotate(90, expand=True)
-        processed.append({'id': art['id'], 'image': img, 'w': w, 'h': h})
+    proc = []
+    for a in artworks:
+        w, h, img = a['print_w'], a['print_h'], a['image']
+        if (h + 0.75 <= roll_w) and (h < w or w + 0.75 > roll_w):
+            w, h, img = h, w, img.rotate(90, expand=True)
+        proc.append({'id': a['id'], 'image': img, 'w': w, 'h': h})
+    sorted_art = sorted(proc, key=lambda x: x['h'], reverse=True)
+    rows, row, rw = [], [], 0
+    for a in sorted_art:
+        if rw + a['w'] + 0.75 > roll_w and row:
+            rows.append(row); row, rw = [], 0
+        row.append(a); rw += a['w'] + 0.75
+    if row: rows.append(row)
+    placed, cur_y = [], 0.375
+    for r in rows:
+        rh = max(i['h'] for i in r)
+        rem = roll_w - 0.75 - sum(i['w'] for i in r)
+        gap, cx = (rem / (len(r)-1)) if len(r)>1 else 0, 0.375
+        if len(r)==1: cx += rem/2
+        for i in r:
+            placed.append({**i, 'x': cx, 'y': cur_y + (rh-i['h'])/2})
+            cx += i['w'] + gap
+        cur_y += rh + 0.375
+    return placed, cur_y
 
-    sorted_art = sorted(processed, key=lambda x: x['h'], reverse=True)
-    rows, current_row, current_row_w = [], [], 0
-    for art in sorted_art:
-        needed = art['w'] + (MARGIN_IN * 2)
-        if current_row_w + needed > roll_width_in and current_row:
-            rows.append(current_row)
-            current_row, current_row_w = [], 0
-        current_row.append(art)
-        current_row_w += needed
-    if current_row: rows.append(current_row)
-
-    placed, curr_y = [], MARGIN_IN 
-    for row in rows:
-        row_h = max(item['h'] for item in row)
-        rem_w = roll_width_in - (MARGIN_IN * 2) - sum(i['w'] for i in row)
-        h_gap, curr_x = (rem_w / (len(row) - 1)) if len(row) > 1 else 0, MARGIN_IN
-        if len(row) == 1: curr_x += rem_w / 2
-        for item in row:
-            v_off = (row_h - item['h']) / 2
-            placed.append({**item, 'x': curr_x, 'y': curr_y + v_off})
-            curr_x += item['w'] + h_gap
-        curr_y += row_h + MARGIN_IN 
-    return placed, curr_y
-
-def generate_png_file(placed, roll_w, roll_h, mirror=False):
-    canvas = Image.new('RGBA', (int(roll_w * DPI), int(roll_h * DPI)), (0, 0, 0, 0))
-    for art in placed:
-        tw, th = int(art['w'] * DPI), int(art['h'] * DPI)
-        res = art['image'].resize((tw, th), Image.Resampling.LANCZOS)
-        canvas.alpha_composite(res, (int(art['x'] * DPI), int(art['y'] * DPI)))
-    if mirror: canvas = ImageOps.mirror(canvas)
-    buf = io.BytesIO()
-    canvas.save(buf, format="PNG", dpi=(DPI, DPI))
-    buf.seek(0)
+def generate_png(placed, rw, rh, mir):
+    canv = Image.new('RGBA', (int(rw*DPI), int(rh*DPI)), (0,0,0,0))
+    for a in placed:
+        res = a['image'].resize((int(a['w']*DPI), int(a['h']*DPI)), Image.Resampling.LANCZOS)
+        canv.alpha_composite(res, (int(a['x']*DPI), int(a['y']*DPI)))
+    if mir: canv = ImageOps.mirror(canv)
+    buf = io.BytesIO(); canv.save(buf, format="PNG", dpi=(DPI, DPI)); buf.seek(0)
     return buf
 
-# --- 4. Main App UI ---
 st.set_page_config(page_title="DTF Pro Builder", layout="wide")
 st.title('🖨️ DTF Universal Workspace')
 
 with st.sidebar:
-    st.header("1. Project Actions")
-    if st.button("🗑️ CLEAR CURRENT JOB", type="primary", use_container_width=True): 
-        clear_all_data()
-        st.rerun()
-
-    st.divider()
-    st.header("2. Job Setup")
-    cust = st.text_input("Customer", value="Client")
-    order = st.text_input("Order #", value="1001")
-    price = st.number_input("Price/ft", value=15.0)
-    mirror = st.checkbox("Mirror Print", value=False)
-
-    st.divider()
-    st.header("3. Add Artwork")
-    file = st.file_uploader("Upload Art", type=['png', 'pdf', 'ai', 'eps', 'webp', 'tiff'], key=f"u_{st.session_state.uploader_key}")
-    
+    if st.button("🗑️ CLEAR JOB", type="primary", use_container_width=True): 
+        clear_all_data(); st.rerun()
+    cust, order = st.text_input("Customer", "Client"), st.text_input("Order #", "1001")
+    price, mirror = st.number_input("Price/ft", 15.0), st.checkbox("Mirror Print")
+    file = st.file_uploader("Upload Art", type=['png','pdf','ai','eps','webp','tiff'], key=f"u_{st.session_state.uploader_key}")
     if file:
         ext = file.name.split('.')[-1].lower()
-        if ext in ['pdf', 'ai', 'eps']:
-            raw_img = rasterize_vector(file.read(), ext)
-        else:
-            raw_img = Image.open(file).convert("RGBA")
-        
-        if raw_img:
-            bbox = raw_img.getbbox()
-            img_data = raw_img.crop(bbox) if bbox else raw_img
-            dpi_v = img_data.info.get('dpi', (DPI, DPI))[0]
-            aw, ah = round(img_data.width/dpi_v, 2), round(img_data.height/dpi_v, 2)
-
-            if aw > ROLL_WIDTH_IN:
-                st.error(f"❌ Width {aw}\" > {ROLL_WIDTH_IN}\""); st.stop()
-
-            # Scan for semi-transparency
-            pix_data = list(img_data.getdata())
-            alpha = [p[3] for p in pix_data if p[3] > 0]
-            semi_pct = (len([a for a in alpha if a < 255]) / len(alpha) * 100) if alpha else 0
-
-            with st.form("add_form"):
+        raw = rasterize_vector(file.read(), ext) if ext in ['pdf','ai','eps'] else Image.open(file).convert("RGBA")
+        if raw:
+            box = raw.getbbox(); img = raw.crop(box) if box else raw
+            dpi_v = img.info.get('dpi', (DPI, DPI))[0]
+            aw, ah = round(img.width/dpi_v, 2), round(img.height/dpi_v, 2)
+            if aw > 22: st.error("Width > 22\""); st.stop()
+            with st.form("add"):
                 c1, c2 = st.columns(2)
-                win = c1.number_input("Width (in)", 0.1, 22.0, float(aw))
-                hin = c2.number_input("Height (in)", 0.1, 120.0, float(ah))
-                eff_dpi = int(img_data.width / win)
-                if eff_dpi < 200: st.error(f"Low Res: {eff_dpi} DPI")
-                if semi_pct > 5: st.warning(f"Soft Edges: {semi_pct:.1f}%")
-                qty = st.number_input("Quantity", 1, 100, 1)
-                if st.form_submit_button("Add to Roll", use_container_width=True):
-                    for _ in range(qty): 
-                        st.session_state.inventory.append({'id': file.name, 'image': img_data, 'print_w': win, 'print_h': hin})
+                win, hin = c1.number_input("W", 0.1, 22.0, float(aw)), c2.number_input("H", 0.1, 120.0, float(ah))
+                qty = st.number_input("Qty", 1, 100, 1)
+                if st.form_submit_button("Add to Roll"):
+                    for _ in range(qty): st.session_state.inventory.append({'id': file.name, 'image': img, 'print_w': win, 'print_h': hin})
                     st.rerun()
 
-# --- 5. Workspace ---
 if st.session_state.inventory:
-    st.subheader("📦 Inventory Management")
-    u_items = []
-    u_ids = []
+    u_ids = []; u_items = []
     for it in st.session_state.inventory:
-        if it['id'] not in u_ids:
-            u_ids.append(it['id']); u_items.append(it)
-    
+        if it['id'] not in u_ids: u_ids.append(it['id']); u_items.append(it)
     grid = st.columns(4)
-    for idx, item in enumerate(u_items):
-        with grid[idx % 4]:
-            st.image(item['image'], width=100)
-            if st.button(f"Remove {item['id'][:10]}", key=f"r_{idx}", use_container_width=True):
-                st.session_state.inventory = [x for x in st.session_state.inventory if x['id'] != item['id']]
-                st.rerun()
-
-    st.divider()
-    placed, actual_h = optimize_layout_distributed(st.session_state.inventory, ROLL_WIDTH_IN)
-    billable = math.ceil(actual_h / 12) * 12
-    
+    for i, item in enumerate(u_items):
+        with grid[i%4]:
+            st.image(item['image'], width=80)
+            if st.button(f"Remove", key=f"r_{i}"):
+                st.session_state.inventory = [x for x in st.session_state.inventory if x['id'] != item['id']]; st.rerun()
+    placed, ah = optimize_layout_distributed(st.session_state.inventory, 22)
+    bill = math.ceil(ah/12)*12
     m1, m2, m3 = st.columns(3)
-    m1.metric("Roll Length", f"{billable}\"")
-    m2.metric("
+    m1.metric("Length", f"{bill}\"")
+    m2.metric("Cost", f"${(bill/12)*price:.2f}")
+    m3.metric("Items", len(st.session_state.inventory))
+    bg = st.radio("BG:", ["Charcoal", "Gray", "Blue"], horizontal=True)
+    mask = st.checkbox("Underbase Mask")
+    b_map = {"Gray": (240,240,240,255), "Charcoal": (30,30,30,255), "Blue": (0,100,255,255)}
+    viz = Image.new('RGBA', (int(22*20), int(bill*20)), b_map[bg])
+    for a in placed:
+        t = a['image'].copy(); t.thumbnail((int(a['w']*20), int(a['h']*20)))
+        if mask:
+            viz.paste(Image.new("RGBA", t.size, (0,0,0,255)), (int(a['x']*20), int(a['y']*20)), t.getchannel('A'))
+        else:
+            viz.paste(t, (int(a['x']*20), int(a['y']*20)), t)
+    st.image(viz if not mirror else ImageOps.mirror(viz), use_container_width=True)
+    op = st.text_input("Operator", "Staff")
+    if st.download_button("Download PNG", generate_png(placed, 22, bill, mirror), f"{cust}_{order}.png"):
+        st.session_state.history.append({'t': datetime.datetime.now().strftime("%H:%M"), 'j': f"{cust}_{order}", 'op': op})
+        st.rerun()
+
+if st.session_state.history:
+    st.divider()
+    for h in st.session_state.history[::-1]: st.write(f"✅ {h['t']} | {h['j']} | Op: {h['op']}")
+
+st.caption(f"v2.7 | {datetime.datetime.now().strftime('%Y-%m-%d')}")
